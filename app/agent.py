@@ -11,6 +11,7 @@ from google.adk.tools.function_tool import FunctionTool
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.adk.runners import Runner
 from google.genai import types
+from vertexai.generative_models import GenerativeModel
 
 from app.tools.document_search import document_search_tool
 from app.tools.web_search import web_search_tool
@@ -25,6 +26,14 @@ vertexai.init(
     location="us-central1"
 )
 
+# Global logs for UI display
+agent_logs = []
+
+def log_event(event_type, message):
+    log_entry = f"**{event_type}**: {message}"
+    print(log_entry)
+    agent_logs.append(log_entry)
+
 # Custom Gemini class to force Vertex AI usage
 class VertexGemini(Gemini):
     @cached_property
@@ -35,15 +44,44 @@ class VertexGemini(Gemini):
             location="us-central1"
         )
 
-# Global logs for UI display
-agent_logs = []
+# ---------------------------------------------------
+# COMPONENT 1: PLANNER (Phase 1 Requirement)
+# ---------------------------------------------------
+def planner(query, history=""):
+    """Explicit planning step as mandated by Phase 1."""
+    log_event("Planning", "Decomposing research task into tool calls...")
+    
+    planner_prompt = f"""
+    You are an Autonomous Research Planner.
+    Break down the user query into a list of specific tool calls.
+    
+    User Query: {query}
+    Previous Context: {history}
+    
+    Available Tools:
+    1. document_search_tool(query): Semantic search over private company documents.
+    2. web_search_tool(query): General internet search for real-time info.
+    3. financial_data_tool(category): Live market data. 'category' MUST be 'stocks', 'crypto', or 'currencies'.
+    4. news_agent_tool(query): Latest headlines via sub-agent.
+    5. canvas_tool(output_type, title, content, language): Generates reports/code.
+    
+    Output a JSON list of tool calls:
+    [
+      {{"tool": "tool_name", "args": {{"arg_name": "value"}}, "reason": "why"}}
+    ]
+    """
+    
+    model = GenerativeModel("gemini-2.0-flash")
+    response = model.generate_content(
+        planner_prompt,
+        generation_config={"response_mime_type": "application/json"}
+    )
+    return json.loads(response.text)
 
-def log_event(event_type, message):
-    log_entry = f"**{event_type}**: {message}"
-    print(log_entry)
-    agent_logs.append(log_entry)
-
-# Define ADK Tools
+# ---------------------------------------------------
+# COMPONENT 2: EXECUTOR (Phase 1 & ADK Mandate)
+# ---------------------------------------------------
+# Define official ADK Tools
 tools = [
     FunctionTool(func=document_search_tool),
     FunctionTool(func=web_search_tool),
@@ -52,45 +90,34 @@ tools = [
     FunctionTool(func=canvas_tool)
 ]
 
-# Initialize the ADK Agent (Module 3 learning objective)
-research_agent = Agent(
-    name="ResearchAgent",
+# The ADK Agent acts as the Execution engine
+research_executor = Agent(
+    name="ExecutionAgent",
     model=VertexGemini(model="gemini-2.0-flash"),
-    instruction="""
-    You are an advanced autonomous research assistant powered by the Google ADK.
-    
-    Guidelines:
-    1. For local company docs, use `document_search_tool`.
-    2. For market data, use `financial_data_tool` (routed via MCP).
-    3. For headlines, use `news_agent_tool` (A2A).
-    4. For general web, use `web_search_tool`.
-    5. For reports/code, use `canvas_tool`.
-    """,
+    instruction="Execute the provided research plan using your tools. Return raw findings.",
     tools=tools
 )
 
-# Set up the Runner
 runner = Runner(
     app_name="ResearchApp",
-    agent=research_agent,
+    agent=research_executor,
     session_service=InMemorySessionService(),
     auto_create_session=True
 )
 
-async def _run_agent_to_completion(query, user_id, session_id):
+async def _run_executor(query, user_id, session_id):
     """Universal ADK event collector."""
     new_message = types.Content(
         parts=[types.Part(text=query)],
         role="user"
     )
     
-    final_text = ""
+    raw_context = ""
     async for event in runner.run_async(
         user_id=user_id,
         session_id=session_id,
         new_message=new_message
     ):
-        # Log tool calls
         if hasattr(event, 'get_function_calls'):
             try:
                 f_calls = event.get_function_calls()
@@ -99,14 +126,40 @@ async def _run_agent_to_completion(query, user_id, session_id):
                         log_event("Execution", f"ADK calling tool: `{fc.name}`")
             except: pass
 
-        # Extract text content
         if hasattr(event, 'content') and event.content and event.content.parts:
             for part in event.content.parts:
                 if hasattr(part, 'text') and part.text:
-                    final_text += part.text
+                    raw_context += part.text
                     
-    return final_text
+    return raw_context
 
+# ---------------------------------------------------
+# COMPONENT 3: SYNTHESIZER (Phase 1 & 2 Requirement)
+# ---------------------------------------------------
+def synthesiser(query, evidence):
+    """Explicit synthesis step with source reconciliation as mandated by Phase 2."""
+    log_event("Synthesis", "Reconciling evidence and citing sources...")
+    
+    synth_prompt = f"""
+    You are an expert Research Synthesizer.
+    
+    Query: {query}
+    Evidence Collected: {evidence}
+    
+    Task:
+    1. Produce a unified, coherent answer.
+    2. Flag any conflicting information found in the sources.
+    3. CITE sources explicitly (e.g., [Document Source 1], [Web Source 2]).
+    4. Be professional and objective.
+    """
+    
+    model = GenerativeModel("gemini-2.0-flash")
+    response = model.generate_content(synth_prompt)
+    return response.text
+
+# ---------------------------------------------------
+# MAIN AGENT LOOP (Phase 4)
+# ---------------------------------------------------
 def _run_async(coro):
     """Universal async executor."""
     try:
@@ -121,6 +174,7 @@ def ask_agent(query, max_iterations=3):
     agent_logs = []
     
     current_query = query
+    accumulated_context = ""
     final_answer = ""
     user_id = "default_user"
     session_id = "default_session"
@@ -131,22 +185,33 @@ def ask_agent(query, max_iterations=3):
         log_event("Iteration", f"Phase {iteration + 1}")
         
         try:
-            # Step 1: ADK Plan & Execute
-            final_answer = _run_async(_run_agent_to_completion(current_query, user_id, session_id))
+            # 1. Plan
+            plan = planner(current_query, accumulated_context)
+            plan_str = ", ".join([f"`{p['tool']}`" for p in plan])
+            log_event("Planner", f"Executing: {plan_str}")
             
-            # Step 2: Critique (Phase 4 requirement)
+            # 2. Execute (via ADK)
+            # We pass the plan to the ADK Agent to execute
+            execution_query = f"Execute this plan: {json.dumps(plan)}"
+            new_findings = _run_async(_run_executor(execution_query, user_id, session_id))
+            accumulated_context += f"\n\nFindings from Phase {iteration+1}:\n{new_findings}"
+            
+            # 3. Synthesize
+            final_answer = synthesiser(query, accumulated_context)
+            
+            # 4. Critique
             log_event("Critique", "Self-evaluating response quality...")
             critique = critique_response(query, final_answer)
             
-            if "COMPLETE" in critique.upper():
-                log_event("Status", "Response validated.")
+            if critique.get("complete"):
+                log_event("Status", "Response validated and complete.")
                 break
-            elif "FOLLOW_UP:" in critique:
-                follow_up = critique.split("FOLLOW_UP:")[-1].strip()
-                log_event("Refining", f"Gap found: {follow_up}")
-                current_query = f"Previous research was incomplete. Please find info on: {follow_up}. Update the answer."
             else:
-                break
+                follow_ups = critique.get("follow_ups", [])
+                if not follow_ups:
+                    break
+                log_event("Refining", f"Found gaps: {', '.join(follow_ups)}")
+                current_query = f"Original Query: {query}\nFollow-up research needed on: {follow_ups}"
                 
         except Exception as e:
             log_event("Error", str(e))

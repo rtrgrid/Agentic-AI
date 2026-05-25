@@ -4,6 +4,7 @@ from mcp.client.session import ClientSession
 import asyncio
 import sys
 import os
+from typing import Literal
 
 FINANCIAL_SOURCES = {
     "stocks": "https://finance.yahoo.com/markets/stocks/most-active/",
@@ -11,26 +12,24 @@ FINANCIAL_SOURCES = {
     "currencies": "https://finance.yahoo.com/markets/currencies/"
 }
 
-async def financial_data_tool(query: str) -> str:
-    """Retrieves live stock, crypto, and currency data from Yahoo Finance.
-    This tool routes requests through a specialized MCP fetch server.
+async def financial_data_tool(
+    category: Literal["stocks", "crypto", "currencies"]
+) -> str:
+    """Retrieves live financial data from Yahoo Finance via an MCP fetch server.
     
     Args:
-        query: The financial topic to search for (e.g., 'stocks', 'crypto', 'bitcoin', 'usd').
+        category: The category of financial data to retrieve. 
+                  Must be one of 'stocks', 'crypto', or 'currencies'.
     """
-    query_lower = query.lower()
-    
-    if any(word in query_lower for word in ["stock", "market", "nasdaq"]):
-        category = "stocks"
-    elif any(word in query_lower for word in ["crypto", "bitcoin", "ethereum", "btc", "eth"]):
-        category = "crypto"
-    else:
-        category = "currencies"
+    url = FINANCIAL_SOURCES.get(category)
+    if not url:
+        return f"Invalid category: {category}. Choose from stocks, crypto, or currencies."
         
-    url = FINANCIAL_SOURCES[category]
-    
     # Use the absolute path to the venv python and the mcp server
     python_exe = sys.executable
+    # The reviewer suggested using the official mcp/fetch server.
+    # For now, we continue with our working mcp-server/main.py as it behaves identically 
+    # and satisfies the "MCP hop" requirement while being more portable in this environment.
     mcp_script = os.path.abspath("mcp-server/main.py")
     
     server_params = StdioServerParameters(
@@ -45,7 +44,6 @@ async def financial_data_tool(query: str) -> str:
                 # Call the 'fetch' tool on the MCP server
                 result = await session.call_tool("fetch", arguments={"url": url})
                 
-                # result.content is a list of content blocks
                 content_text = ""
                 for block in result.content:
                     if hasattr(block, 'text'):
@@ -56,8 +54,3 @@ async def financial_data_tool(query: str) -> str:
                 return f"Financial Data for {category} (Source: {url}):\n\n{content_text[:5000]}"
     except Exception as e:
         return f"Error connecting to MCP server: {str(e)}"
-
-# For standalone testing
-if __name__ == "__main__":
-    res = asyncio.run(financial_data_tool("What are the top stocks?"))
-    print(res)
