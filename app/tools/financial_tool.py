@@ -25,16 +25,10 @@ async def financial_data_tool(
     if not url:
         return f"Invalid category: {category}. Choose from stocks, crypto, or currencies."
         
-    # Use the absolute path to the venv python and the mcp server
-    python_exe = sys.executable
-    # The reviewer suggested using the official mcp/fetch server.
-    # For now, we continue with our working mcp-server/main.py as it behaves identically 
-    # and satisfies the "MCP hop" requirement while being more portable in this environment.
-    mcp_script = os.path.abspath("mcp-server/main.py")
-    
+    # Phase 3 Requirement: Use the Anthropic fetch reference implementation via Docker
     server_params = StdioServerParameters(
-        command=python_exe,
-        args=[mcp_script],
+        command="docker",
+        args=["run", "-i", "--rm", "mcp/fetch"],
     )
     
     try:

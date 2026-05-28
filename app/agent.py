@@ -63,7 +63,7 @@ def planner(query, history=""):
     2. web_search_tool(query): General internet search for real-time info.
     3. financial_data_tool(category): Live market data. 'category' MUST be 'stocks', 'crypto', or 'currencies'.
     4. news_agent_tool(query): Latest headlines via sub-agent.
-    5. canvas_tool(output_type, title, content, language): Generates reports/code.
+    5. canvas_tool(output_type, title, content, language): Generates reports/code. TRIGGER this when the user asks for a report, summary, or code snippet.
     
     Output a JSON list of tool calls:
     [
@@ -136,10 +136,14 @@ async def _run_executor(query, user_id, session_id):
 # ---------------------------------------------------
 # COMPONENT 3: SYNTHESIZER (Phase 1 & 2 Requirement)
 # ---------------------------------------------------
-def synthesiser(query, evidence):
+def synthesiser(query, evidence, plan=None):
     """Explicit synthesis step with source reconciliation as mandated by Phase 2."""
     log_event("Synthesis", "Reconciling evidence and citing sources...")
     
+    canvas_instruction = ""
+    if plan and any(p.get("tool") == "canvas_tool" for p in plan):
+        canvas_instruction = "The Planner triggered the Canvas tool. Ensure you prepare and present the Canvas input/output in the appropriate format (e.g., Markdown blocks, HTML rendering, or Code fences) as requested by the user."
+
     synth_prompt = f"""
     You are an expert Research Synthesizer.
     
@@ -151,6 +155,7 @@ def synthesiser(query, evidence):
     2. Flag any conflicting information found in the sources.
     3. CITE sources explicitly (e.g., [Document Source 1], [Web Source 2]).
     4. Be professional and objective.
+    5. {canvas_instruction}
     """
     
     model = GenerativeModel("gemini-2.0-flash")
@@ -197,7 +202,7 @@ def ask_agent(query, max_iterations=3):
             accumulated_context += f"\n\nFindings from Phase {iteration+1}:\n{new_findings}"
             
             # 3. Synthesize
-            final_answer = synthesiser(query, accumulated_context)
+            final_answer = synthesiser(query, accumulated_context, plan)
             
             # 4. Critique
             log_event("Critique", "Self-evaluating response quality...")
